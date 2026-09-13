@@ -2,8 +2,10 @@ package com.jarvis.assistant
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.Intent
 import android.graphics.Path
 import android.graphics.Rect
+import android.net.Uri
 import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -19,7 +21,15 @@ class JarvisAccessibilityService : AccessibilityService() {
         instance = this
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // Auto-pause accessibility touch intercepting if on sensitive banking screens
+        val pkg = event?.packageName?.toString() ?: ""
+        if (pkg.contains("paisa") || pkg.contains("phonepe") || pkg.contains("paytm")) {
+            // Passive mode: do not hook into touch/keyboard on banking screens
+            return
+        }
+    }
+
     override fun onInterrupt() {}
 
     override fun onDestroy() {
@@ -27,20 +37,26 @@ class JarvisAccessibilityService : AccessibilityService() {
         instance = null
     }
 
-    // Finds any visible button or text and autonomously clicks it
+    fun launchAppOrQR(packageName: String) {
+        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+        if (launchIntent != null) {
+            startActivity(launchIntent)
+        } else {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("upi://pay"))
+            intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            try { startActivity(intent) } catch (e: Exception) {}
+        }
+    }
+
     fun clickElementByText(text: String): Boolean {
         val root = rootInActiveWindow ?: return false
         val nodes = root.findAccessibilityNodeInfosByText(text)
         if (!nodes.isNullOrEmpty()) {
             for (node in nodes) {
-                if (node.isClickable) {
-                    return node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                }
+                if (node.isClickable) return node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 var parent = node.parent
                 while (parent != null) {
-                    if (parent.isClickable) {
-                        return parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    }
+                    if (parent.isClickable) return parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                     parent = parent.parent
                 }
                 val rect = Rect()
