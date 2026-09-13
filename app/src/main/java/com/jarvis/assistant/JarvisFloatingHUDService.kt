@@ -1,10 +1,14 @@
 package com.jarvis.assistant
 
 import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
@@ -17,7 +21,11 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.TextView
+import java.io.OutputStreamWriter
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.Locale
+import kotlin.concurrent.thread
 
 class JarvisFloatingHUDService : Service() {
 
@@ -25,39 +33,63 @@ class JarvisFloatingHUDService : Service() {
     private lateinit var edgeHandle: FrameLayout
     private lateinit var handleBar: View
     private lateinit var statusText: TextView
+    private lateinit var audioManager: AudioManager
     private var speechRecognizer: SpeechRecognizer? = null
     private var isExpanded = false
+
+    private val scoReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val state = intent?.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, -1)
+            if (state == AudioManager.SCO_AUDIO_STATE_CONNECTED) {
+                // Bluetooth mic locked and active
+            }
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
 
-        // Root container for edge handle
+        // Register Hardware Bluetooth SCO Audio Bridge
+        registerReceiver(scoReceiver, IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED))
+        startBluetoothAudio()
+
+        setupEdgeUI()
+    }
+
+    private fun startBluetoothAudio() {
+        try {
+            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            audioManager.startBluetoothSco()
+            audioManager.isBluetoothScoOn = true
+        } catch (e: Exception) {}
+    }
+
+    private fun setupEdgeUI() {
         edgeHandle = FrameLayout(this)
 
-        // Native phone-like slim rounded edge bar (Grey translucent)
         handleBar = View(this).apply {
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
-                cornerRadius = 20f
-                setColor(Color.parseColor("#994B5563")) // Sleek semi-transparent grey
+                cornerRadius = 24f
+                setColor(Color.parseColor("#99374151")) // Sleek edge translucent
             }
         }
 
         statusText = TextView(this).apply {
-            text = "AI"
+            text = "JARVIS"
             setTextColor(Color.WHITE)
             textSize = 10f
             gravity = Gravity.CENTER
             visibility = View.GONE
         }
 
-        val barParams = FrameLayout.LayoutParams(16, 140).apply {
+        edgeHandle.addView(handleBar, FrameLayout.LayoutParams(14, 150).apply {
             gravity = Gravity.CENTER_VERTICAL or Gravity.END
-        }
-        edgeHandle.addView(handleBar, barParams)
+        })
         edgeHandle.addView(statusText, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
             gravity = Gravity.CENTER
         })
@@ -102,9 +134,7 @@ class JarvisFloatingHUDService : Service() {
                         return true
                     }
                     MotionEvent.ACTION_UP -> {
-                        if (isClick) {
-                            toggleVoiceAssistant()
-                        }
+                        if (isClick) toggleListening()
                         return true
                     }
                 }
@@ -115,22 +145,21 @@ class JarvisFloatingHUDService : Service() {
         windowManager.addView(edgeHandle, params)
     }
 
-    private fun toggleVoiceAssistant() {
+    private fun toggleListening() {
         if (!isExpanded) {
             isExpanded = true
-            // Expand to sleek active bar
             handleBar.layoutParams.width = 160
             handleBar.requestLayout()
-            (handleBar.background as GradientDrawable).setColor(Color.parseColor("#EE2563EB")) // Active Blue
+            (handleBar.background as GradientDrawable).setColor(Color.parseColor("#EE2563EB"))
             statusText.text = "Listening..."
             statusText.visibility = View.VISIBLE
-            listenVoiceCommand()
+            listenSpeech()
         } else {
-            resetToEdge()
+            resetEdge()
         }
     }
 
-    private fun listenVoiceCommand() {
+    private fun listenSpeech() {
         if (speechRecognizer == null) {
             speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
         }
@@ -143,14 +172,12 @@ class JarvisFloatingHUDService : Service() {
         speechRecognizer?.setRecognitionListener(object : RecognitionListener {
             override fun onResults(results: Bundle?) {
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                val query = matches?.firstOrNull() ?: ""
-                statusText.text = "Running..."
-                executeAutonomousIntent(query)
-                resetToEdge()
+                val voiceQuery = matches?.firstOrNull() ?: ""
+                statusText.text = "Executing..."
+                sendToTermuxBrain(voiceQuery)
+                resetEdge()
             }
-            override fun onError(error: Int) {
-                resetToEdge()
-            }
+            override fun onError(error: Int) { resetEdge() }
             override fun onReadyForSpeech(params: Bundle?) {}
             override fun onBeginningOfSpeech() {}
             override fun onRmsChanged(rmsdB: Float) {}
@@ -163,40 +190,39 @@ class JarvisFloatingHUDService : Service() {
         speechRecognizer?.startListening(intent)
     }
 
-    private fun executeAutonomousIntent(command: String) {
-        val cmd = command.lowercase(Locale.ROOT)
-        val service = JarvisAccessibilityService.instance ?: return
-
-        when {
-            cmd.contains("pay") || cmd.contains("scan") || cmd.contains("qr") -> {
-                // Autonomous Payment Trigger: Temporarily hide overlay so Bank security doesn't block!
-                edgeHandle.visibility = View.GONE
-                service.launchAppOrQR("com.google.android.apps.nbu.paisa.user") // GPay or Scanner
-                edgeHandle.postDelayed({ edgeHandle.visibility = View.VISIBLE }, 8000)
+    private fun sendToTermuxBrain(query: String) {
+        if (query.isEmpty()) return
+        thread {
+            try {
+                val url = URL("http://127.0.0.1:8765/command")
+                val conn = url.openConnection() as HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.doOutput = true
+                conn.connectTimeout = 3000
+                OutputStreamWriter(conn.outputStream).use { it.write("query=" + query) }
+                conn.responseCode
+            } catch (e: Exception) {
+                // Fallback direct execution via accessibility
+                JarvisAccessibilityService.instance?.handleDirectVoice(query)
             }
-            cmd.contains("home") -> service.goHome()
-            cmd.contains("click") || cmd.contains("open") || cmd.contains("tap") -> {
-                val target = cmd.replace("click", "").replace("open", "").replace("tap", "").trim()
-                service.clickElementByText(target)
-            }
-            cmd.contains("type") || cmd.contains("write") -> {
-                val textToType = cmd.replace("type", "").replace("write", "").trim()
-                service.typeIntoFocusedInput(textToType)
-            }
-            else -> service.clickElementByText(cmd)
         }
     }
 
-    private fun resetToEdge() {
+    private fun resetEdge() {
         isExpanded = false
-        handleBar.layoutParams.width = 16
+        handleBar.layoutParams.width = 14
         handleBar.requestLayout()
-        (handleBar.background as GradientDrawable).setColor(Color.parseColor("#994B5563"))
+        (handleBar.background as GradientDrawable).setColor(Color.parseColor("#99374151"))
         statusText.visibility = View.GONE
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        try {
+            audioManager.stopBluetoothSco()
+            audioManager.isBluetoothScoOn = false
+            unregisterReceiver(scoReceiver)
+        } catch (e: Exception) {}
         speechRecognizer?.destroy()
         if (::edgeHandle.isInitialized) windowManager.removeView(edgeHandle)
     }

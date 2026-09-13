@@ -22,10 +22,9 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Auto-pause accessibility touch intercepting if on sensitive banking screens
         val pkg = event?.packageName?.toString() ?: ""
+        // Stealth Mode on Banking screens: Do not hijack inputs to prevent security errors
         if (pkg.contains("paisa") || pkg.contains("phonepe") || pkg.contains("paytm")) {
-            // Passive mode: do not hook into touch/keyboard on banking screens
             return
         }
     }
@@ -37,14 +36,20 @@ class JarvisAccessibilityService : AccessibilityService() {
         instance = null
     }
 
-    fun launchAppOrQR(packageName: String) {
-        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
-        if (launchIntent != null) {
-            startActivity(launchIntent)
-        } else {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("upi://pay"))
-            intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            try { startActivity(intent) } catch (e: Exception) {}
+    fun handleDirectVoice(cmd: String) {
+        val text = cmd.lowercase()
+        when {
+            text.contains("home") -> goHome()
+            text.contains("back") -> performGlobalAction(GLOBAL_ACTION_BACK)
+            text.contains("scan") || text.contains("pay") -> {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse("upi://pay"))
+                intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                try { startActivity(intent) } catch (e: Exception) {}
+            }
+            text.contains("open") || text.contains("click") -> {
+                val target = text.replace("open", "").replace("click", "").trim()
+                clickElementByText(target)
+            }
         }
     }
 
@@ -67,18 +72,9 @@ class JarvisAccessibilityService : AccessibilityService() {
         return false
     }
 
-    fun typeIntoFocusedInput(text: String): Boolean {
-        val root = rootInActiveWindow ?: return false
-        val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
-        val args = Bundle().apply {
-            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
-        }
-        return focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-    }
-
     fun tapCoordinates(x: Float, y: Float): Boolean {
         val path = Path().apply { moveTo(x, y) }
-        val stroke = GestureDescription.StrokeDescription(path, 0, 80)
+        val stroke = GestureDescription.StrokeDescription(path, 0, 70)
         return dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
     }
 
