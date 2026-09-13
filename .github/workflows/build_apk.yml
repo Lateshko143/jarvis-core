@@ -19,19 +19,16 @@ jobs:
         java-version: '17'
         distribution: 'temurin'
 
-    - name: Setup Android SDK
-      uses: android-actions/setup-android@v3
-
-    - name: Setup Gradle 8.4
-      uses: gradle/actions/setup-gradle@v3
-      with:
-        gradle-version: '8.4'
-
-    - name: Build APK with Gradle 8.4
+    - name: Accept Android SDK Licenses
       run: |
-        gradle assembleDebug --no-daemon --stacktrace
+        yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
-    - name: Upload APK Artifact
+    - name: Assemble Release/Debug APK
+      run: |
+        chmod +x gradlew
+        ./gradlew assembleDebug --no-daemon
+
+    - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
         name: Jarvis-APK
